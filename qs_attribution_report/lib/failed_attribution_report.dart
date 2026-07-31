@@ -1,57 +1,46 @@
+import 'failed_attribution_report_type.dart';
+import 'ios_attribution_report_config.dart';
+
 class FailedAttributionReport {
   const FailedAttributionReport({
     required this.id,
-    required this.apiUrl,
-    required this.data,
-    required this.sct,
+    required this.type,
     required this.failedCount,
     required this.nextRetryTimeMs,
+    this.apiUrl = "",
+    this.data = "",
+    this.sct = "",
+    this.iosConfig,
   });
 
   final String id;
+  final FailedAttributionReportType type;
   final String apiUrl;
   final String data;
   final String sct;
   final int failedCount;
   final int nextRetryTimeMs;
-
-  factory FailedAttributionReport.fromJson(Map<String, dynamic> json) {
-    return FailedAttributionReport(
-      id: json["id"] as String? ?? "",
-      apiUrl: json["apiUrl"] as String? ?? "",
-      data: json["data"] as String? ?? "",
-      sct: json["sct"] as String? ?? "",
-      failedCount: json["failedCount"] as int? ?? 0,
-      nextRetryTimeMs: json["nextRetryTimeMs"] as int? ?? 0,
-    );
-  }
+  final IosAttributionReportConfig? iosConfig;
 
   FailedAttributionReport copyWith({
     String? id,
+    FailedAttributionReportType? type,
     String? apiUrl,
     String? data,
     String? sct,
     int? failedCount,
     int? nextRetryTimeMs,
+    IosAttributionReportConfig? iosConfig,
   }) {
     return FailedAttributionReport(
       id: id ?? this.id,
+      type: type ?? this.type,
       apiUrl: apiUrl ?? this.apiUrl,
       data: data ?? this.data,
       sct: sct ?? this.sct,
       failedCount: failedCount ?? this.failedCount,
       nextRetryTimeMs: nextRetryTimeMs ?? this.nextRetryTimeMs,
+      iosConfig: iosConfig ?? this.iosConfig,
     );
-  }
-
-  Map<String, dynamic> toJson() {
-    return {
-      "id": id,
-      "apiUrl": apiUrl,
-      "data": data,
-      "sct": sct,
-      "failedCount": failedCount,
-      "nextRetryTimeMs": nextRetryTimeMs,
-    };
   }
 }

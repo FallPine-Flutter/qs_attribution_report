@@ -1,0 +1,1 @@
+enum FailedAttributionReportType { encryptedData, iosAsaInfo }

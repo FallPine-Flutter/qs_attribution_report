@@ -8,7 +8,8 @@ abstract class QsAttributionReportPlatform extends PlatformInterface {
 
   static final Object _token = Object();
 
-  static QsAttributionReportPlatform _instance = MethodChannelQsAttributionReport();
+  static QsAttributionReportPlatform _instance =
+      MethodChannelQsAttributionReport();
 
   /// The default instance of [QsAttributionReportPlatform] to use.
   ///
@@ -21,9 +22,5 @@ abstract class QsAttributionReportPlatform extends PlatformInterface {
   static set instance(QsAttributionReportPlatform instance) {
     PlatformInterface.verifyToken(instance, _token);
     _instance = instance;
-  }
-
-  Future<String?> getPlatformVersion() {
-    throw UnimplementedError('platformVersion() has not been implemented.');
   }
 }

@@ -1,6 +1,6 @@
 name: qs_attribution_report
 description: "归因报告插件"
-version: 1.0.0
+version: 1.0.1
 homepage: "https://github.com/FallPine-Flutter/qs_attribution_report"
 
 environment:
@@ -17,6 +17,7 @@ dependencies:
   qs_log: ^1.0.0  # 日志工具库
   qs_device_info: ^1.0.0  # 设备信息工具库
   qs_storage_tool: ^0.0.1    # 存储工具库
+  qs_asa_attribution_info: ^1.0.0 # ASA归因信息工具库
 
 dev_dependencies:
   flutter_test:

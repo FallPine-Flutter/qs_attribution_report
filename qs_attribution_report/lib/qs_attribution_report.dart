@@ -8,27 +8,19 @@ import 'package:qs_device_info/qs_device_info.dart';
 import 'package:qs_log/qs_log.dart';
 import 'package:qs_net_request/qs_net_request.dart';
 import 'package:qs_storage_tool/qs_storage_tool.dart';
+import 'package:qs_asa_attribution_info/qs_asa_attribution_info.dart';
 
 import 'failed_attribution_report.dart';
-import 'qs_attribution_report_platform_interface.dart';
+import 'failed_attribution_report_type.dart';
+import 'ios_attribution_report_config.dart';
 
 class QsAttributionReport {
-  static const String _failedReportsStorageKey =
-      "qs_attribution_report_failed_attribution_reports";
+  static const String _attributionDataUploadedKey =
+      "qs_attribution_report_attribution_info_report_success";
   static const int _maxRetryDelaySeconds = 60;
 
+  static final List<FailedAttributionReport> _failedReports = [];
   static bool _isRetryLoopRunning = false;
-
-  Future<String?> getPlatformVersion() {
-    return QsAttributionReportPlatform.instance.getPlatformVersion();
-  }
-
-  /// App 重启后主动恢复失败归因数据上报
-  ///
-  /// 只负责唤醒后台补报任务，不等待队列全部完成，避免阻塞业务启动流程。
-  static void retryFailedAttributionReports() {
-    _startFailedReportsRetry();
-  }
 
   /// 安卓归因数据上报
   static Future<bool> reportAndroidAttributionInfo({
@@ -57,6 +49,13 @@ class QsAttributionReport {
     required String? costCurrency,
     required String? jsonResponse,
   }) async {
+    final isUploaded = await QsStorageTool.getBool(
+      key: _attributionDataUploadedKey,
+    );
+    if (isUploaded == true) {
+      return true;
+    }
+
     Map<String, dynamic> params = {
       "packageName": packageName,
       "userId": userId,
@@ -93,11 +92,15 @@ class QsAttributionReport {
       return false;
     }
 
-    return _reportEncryptedAttributionInfo(
+    final success = await _reportEncryptedAttributionInfo(
       apiUrl: apiUrl,
       encryptedParams: encryptedParams,
       aesSctToken: aesSctToken,
     );
+    if (success) {
+      await _markAttributionDataUploaded();
+    }
+    return success;
   }
 
   /// iOS归因数据上报
@@ -110,26 +113,73 @@ class QsAttributionReport {
     required String fcmId, // 推送 ID
     required String locale, // 用户语言环境，例如 en_US
     required bool pushState, // 推送开关，true/false 或 1/0
-    required String attributionToken, // iOS 归因 token
-    required Map<String, dynamic> attribution,
   }) async {
+    final isUploaded = await QsStorageTool.getBool(
+      key: _attributionDataUploadedKey,
+    );
+    if (isUploaded == true) {
+      return true;
+    }
+
+    final config = IosAttributionReportConfig(
+      apiUrl: apiUrl,
+      aesSecretKey: aesSecretKey,
+      aesIv: aesIv,
+      aesSctToken: aesSctToken,
+      userId: userId,
+      fcmId: fcmId,
+      locale: locale,
+      pushState: pushState,
+    );
+
+    final success = await _reportIOSAttributionInfo(config: config);
+    if (success) {
+      await _markAttributionDataUploaded();
+    }
+    return success;
+  }
+
+  static Future<bool> _reportIOSAttributionInfo({
+    required IosAttributionReportConfig config,
+    bool saveFailedReport = true,
+  }) async {
+    final attributionToken =
+        await QsAsaAttributionInfo.getAttributionToken() ?? "";
+    final attribution = await QsAsaAttributionInfo.getAttributionInfo();
+    if (attribution == null || attribution.isEmpty) {
+      QsLog.error("获取iOS ASA归因信息失败");
+      if (saveFailedReport) {
+        _saveFailedAttributionReport(
+          FailedAttributionReport(
+            id: _createFailedReportId(),
+            type: FailedAttributionReportType.iosAsaInfo,
+            iosConfig: config,
+            failedCount: 1,
+            nextRetryTimeMs: _nextRetryTimeMs(failedCount: 1),
+          ),
+        );
+        _startFailedReportsRetry();
+      }
+      return false;
+    }
+
     // 获取位置信息
     final location = await _getLocationByIp();
 
     Map<String, dynamic> params = {
-      "userId": userId,
-      "fcmId": fcmId,
+      "userId": config.userId,
+      "fcmId": config.fcmId,
       "appVersion": await _getAppVersion(),
       "deviceType": _getDeviceType(),
       "deviceModel": await _getDeviceModel(),
       "deviceOSVersion": await _getDeviceOSVersion(),
       "timezone": location?.timezone ?? "",
-      "locale": locale,
+      "locale": config.locale,
       "ipCountry": location?.country ?? "",
       "ipState": location?.regionName ?? "",
       "ipCity": location?.city ?? "",
       "ipAddress": location?.query ?? "",
-      "pushState": pushState,
+      "pushState": config.pushState,
       "attributionToken": attributionToken,
       "attribution": attribution,
     };
@@ -141,8 +191,8 @@ class QsAttributionReport {
 
     // JSON 或 AES 失败属于本地不可恢复错误，不启动后台重试。
     String encryptedParams = QsAesEncrypt.encrypt(
-      secretKey: aesSecretKey,
-      iv: aesIv,
+      secretKey: config.aesSecretKey,
+      iv: config.aesIv,
       content: content,
     );
     if (encryptedParams.isEmpty) {
@@ -150,10 +200,18 @@ class QsAttributionReport {
       return false;
     }
 
-    return _reportEncryptedAttributionInfo(
-      apiUrl: apiUrl,
+    if (saveFailedReport) {
+      return _reportEncryptedAttributionInfo(
+        apiUrl: config.apiUrl,
+        encryptedParams: encryptedParams,
+        aesSctToken: config.aesSctToken,
+      );
+    }
+
+    return _postEncryptedAttributionInfo(
+      apiUrl: config.apiUrl,
       encryptedParams: encryptedParams,
-      aesSctToken: aesSctToken,
+      aesSctToken: config.aesSctToken,
     );
   }
 
@@ -171,10 +229,11 @@ class QsAttributionReport {
       return true;
     }
 
-    await _saveFailedAttributionReport(
-      // 只持久化已加密内容，避免把明文归因参数和 AES 信息落盘。
+    _saveFailedAttributionReport(
+      // 只在内存中保存已加密内容，避免把明文归因参数和 AES 信息落盘。
       FailedAttributionReport(
         id: _createFailedReportId(),
+        type: FailedAttributionReportType.encryptedData,
         apiUrl: apiUrl,
         data: encryptedParams,
         sct: aesSctToken,
@@ -224,16 +283,21 @@ class QsAttributionReport {
     unawaited(_runFailedReportsRetryLoop());
   }
 
+  static Future<void> _markAttributionDataUploaded() async {
+    await QsStorageTool.setBool(key: _attributionDataUploadedKey, value: true);
+    _failedReports.clear();
+  }
+
   static Future<void> _runFailedReportsRetryLoop() async {
     try {
       while (true) {
-        final reports = await _getFailedAttributionReports();
+        final reports = _getFailedAttributionReports();
         if (reports.isEmpty) {
           return;
         }
 
         final nowTimeMs = DateTime.now().millisecondsSinceEpoch;
-        // 只处理已到补报时间的数据，未到期的数据继续留在持久化队列中。
+        // 只处理已到补报时间的数据，未到期的数据继续留在内存队列中。
         final dueReports = reports
             .where((report) => report.nextRetryTimeMs <= nowTimeMs)
             .toList();
@@ -253,18 +317,18 @@ class QsAttributionReport {
         }
 
         for (final report in dueReports) {
-          final success = await _postEncryptedAttributionInfo(
-            apiUrl: report.apiUrl,
-            encryptedParams: report.data,
-            aesSctToken: report.sct,
-          );
+          if (_failedReports.isEmpty) {
+            return;
+          }
+
+          final success = await _retryFailedAttributionReport(report);
           if (success) {
-            await _removeFailedAttributionReport(report.id);
-            continue;
+            await _markAttributionDataUploaded();
+            return;
           }
 
           final failedCount = report.failedCount + 1;
-          await _replaceFailedAttributionReport(
+          _replaceFailedAttributionReport(
             report.copyWith(
               failedCount: failedCount,
               nextRetryTimeMs: _nextRetryTimeMs(failedCount: failedCount),
@@ -277,88 +341,47 @@ class QsAttributionReport {
     }
   }
 
-  static Future<List<FailedAttributionReport>>
-  _getFailedAttributionReports() async {
-    try {
-      final reportJsonList = await QsStorageTool.getStringList(
-        key: _failedReportsStorageKey,
-      );
-      if (reportJsonList == null || reportJsonList.isEmpty) {
-        return [];
-      }
-
-      final reports = <FailedAttributionReport>[];
-      for (final reportJson in reportJsonList) {
-        final reportMap = jsonDecode(reportJson);
-        if (reportMap is! Map<String, dynamic>) {
-          continue;
-        }
-
-        final report = FailedAttributionReport.fromJson(reportMap);
-        if (report.id.isEmpty ||
-            report.apiUrl.isEmpty ||
-            report.data.isEmpty ||
-            report.sct.isEmpty) {
-          continue;
-        }
-        reports.add(report);
-      }
-      return reports;
-    } catch (e) {
-      QsLog.error("读取失败归因上报队列失败: $e");
-      return [];
-    }
-  }
-
-  static Future<void> _saveFailedAttributionReport(
+  static Future<bool> _retryFailedAttributionReport(
     FailedAttributionReport report,
   ) async {
-    await _replaceFailedAttributionReport(report);
-    QsLog.info("归因数据上报失败，已加入后台重试队列");
-  }
-
-  static Future<void> _replaceFailedAttributionReport(
-    FailedAttributionReport report,
-  ) async {
-    try {
-      final reports = await _getFailedAttributionReports();
-      final reportIndex = reports.indexWhere((item) => item.id == report.id);
-      if (reportIndex >= 0) {
-        reports[reportIndex] = report;
-      } else {
-        reports.add(report);
-      }
-      await _setFailedAttributionReports(reports);
-    } catch (e) {
-      QsLog.error("保存失败归因上报队列失败: $e");
+    switch (report.type) {
+      case FailedAttributionReportType.encryptedData:
+        return _postEncryptedAttributionInfo(
+          apiUrl: report.apiUrl,
+          encryptedParams: report.data,
+          aesSctToken: report.sct,
+        );
+      case FailedAttributionReportType.iosAsaInfo:
+        final config = report.iosConfig;
+        if (config == null) {
+          QsLog.error("iOS ASA归因补报配置为空");
+          return false;
+        }
+        return _reportIOSAttributionInfo(
+          config: config,
+          saveFailedReport: false,
+        );
     }
   }
 
-  static Future<void> _removeFailedAttributionReport(String id) async {
-    try {
-      final reports = await _getFailedAttributionReports();
-      reports.removeWhere((report) => report.id == id);
-      await _setFailedAttributionReports(reports);
-    } catch (e) {
-      QsLog.error("移除失败归因上报队列失败: $e");
-    }
+  static List<FailedAttributionReport> _getFailedAttributionReports() {
+    return List.of(_failedReports);
   }
 
-  static Future<void> _setFailedAttributionReports(
-    List<FailedAttributionReport> reports,
-  ) async {
-    final reportJsonList = reports
-        .map((report) => jsonEncode(report.toJson()))
-        .toList();
-    if (reportJsonList.isEmpty) {
-      await QsStorageTool.remove(key: _failedReportsStorageKey);
-      return;
-    }
+  static void _saveFailedAttributionReport(FailedAttributionReport report) {
+    _replaceFailedAttributionReport(report);
+    QsLog.info("归因数据上报失败，已加入内存后台重试队列");
+  }
 
-    await QsStorageTool.setStringList(
-      key: _failedReportsStorageKey,
-      value: reportJsonList,
+  static void _replaceFailedAttributionReport(FailedAttributionReport report) {
+    final reportIndex = _failedReports.indexWhere(
+      (item) => item.id == report.id,
     );
+    if (reportIndex >= 0) {
+      _failedReports[reportIndex] = report;
+    } else {
+      _failedReports.add(report);
+    }
   }
 
   static String _createFailedReportId() {

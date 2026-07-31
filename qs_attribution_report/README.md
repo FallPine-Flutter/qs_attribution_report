@@ -1,15 +1,15 @@
 # qs_attribution_report
 
-归因数据上报 Flutter 插件，支持 Android Adjust 归因信息上报、iOS 归因信息上报，并内置失败后的后台退避补报能力。
+归因数据上报 Flutter 插件，支持 Android Adjust 归因信息上报、iOS Apple Search Ads 归因信息上报，并内置失败后的内存后台退避补报能力。
 
 ## 功能
 
-- Android 归因数据上报
-- iOS 归因数据上报
+- Android Adjust 归因数据上报
+- iOS Apple Search Ads 归因数据上报，内部自动获取 attribution token 和归因明细
 - 自动补充 App 版本、设备类型、设备型号、系统版本、IP 位置信息等设备上下文
 - 请求参数 AES 加密后上报
-- 网络失败或服务端返回失败时，自动保存密文请求并在后台退避重试
-- App 重启后可主动唤醒历史失败队列继续补报
+- 网络失败、服务端返回失败或 iOS ASA 归因明细获取失败时，自动在内存中保存任务并在后台退避重试
+- 上报成功后记录成功标记，后续重复调用会直接返回 `true`
 
 ## 安装
 
@@ -17,7 +17,7 @@
 
 ```yaml
 dependencies:
-  qs_attribution_report: ^1.0.0
+  qs_attribution_report: ^1.0.1
 ```
 
 然后执行：
@@ -32,23 +32,7 @@ flutter pub get
 import 'package:qs_attribution_report/qs_attribution_report.dart';
 ```
 
-## App 启动时恢复失败补报
-
-建议在 App 启动后调用一次，用于恢复上一次进程中未完成的失败归因补报。
-
-```dart
-void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-
-  QsAttributionReport.retryFailedAttributionReports();
-
-  runApp(const MyApp());
-}
-```
-
-`retryFailedAttributionReports()` 只会唤醒后台补报任务，不会等待队列全部完成，也不会阻塞启动流程。同一进程内多次调用不会启动多个并发补报循环。
-
-## Android 归因上报
+## Android Adjust 归因上报
 
 ```dart
 final success = await QsAttributionReport.reportAndroidAttributionInfo(
@@ -75,7 +59,7 @@ final success = await QsAttributionReport.reportAndroidAttributionInfo(
 if (success) {
   // 首次上报成功
 } else {
-  // 首次上报失败；如果是网络或服务端失败，插件会自动加入后台补报队列
+  // 首次上报失败；如果是网络或服务端失败，插件会自动加入内存后台补报队列
 }
 ```
 
@@ -102,7 +86,7 @@ if (success) {
 | `costCurrency` | `String?` | 成本币种 |
 | `jsonResponse` | `String?` | 原始归因 JSON 字符串，插件会解析后放入 `raw` 字段 |
 
-## iOS 归因上报
+## iOS Apple Search Ads 归因上报
 
 ```dart
 final success = await QsAttributionReport.reportIOSAttributionInfo(
@@ -114,25 +98,28 @@ final success = await QsAttributionReport.reportIOSAttributionInfo(
   fcmId: "fcm_id",
   locale: "en_US",
   pushState: true,
-  attributionToken: "ios_attribution_token",
-  attribution: {
-    "campaignId": "campaign_id",
-    "adGroupId": "ad_group_id",
-  },
 );
 
 if (success) {
-  // 首次上报成功
+  // 获取到非空 ASA 归因明细，并且上传成功
 } else {
-  // 首次上报失败；如果是网络或服务端失败，插件会自动加入后台补报队列
+  // ASA 归因明细获取失败、网络失败或服务端失败，插件会自动加入内存后台补报队列
 }
 ```
+
+插件会内部通过 `qs_asa_attribution_info` 获取 Apple Search Ads 的 attribution token 和归因明细，调用方不需要再传入 `attributionToken` 或 `attribution`。
+
+iOS 上报成功条件：
+
+- `attribution` 必须不为 `null` 且不为空 Map。
+- `attributionToken` 可以为空；为空时会按空字符串继续上传。
+- 服务端返回 `code == 0`。
 
 ### iOS 参数说明
 
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
-| `apiUrl` | `String` | iOS 归因上报接口地址 |
+| `apiUrl` | `String` | iOS ASA 归因上报接口地址 |
 | `aesSecretKey` | `String` | AES 加密密钥 |
 | `aesIv` | `String` | AES 加密 IV |
 | `aesSctToken` | `String` | 请求头 `sct` token |
@@ -140,12 +127,12 @@ if (success) {
 | `fcmId` | `String` | 推送 ID |
 | `locale` | `String` | 用户语言环境，例如 `en_US`、`zh_CN` |
 | `pushState` | `bool` | 推送开关状态 |
-| `attributionToken` | `String` | iOS 归因 token |
-| `attribution` | `Map<String, dynamic>` | iOS 归因明细数据 |
 
 ## 请求格式
 
-插件会先组装归因参数，再使用 AES 加密完整 JSON 内容，最终发送到 `apiUrl`：
+插件会先组装归因参数，再使用 AES 加密完整 JSON 内容，最终发送到 `apiUrl`。
+
+请求 body：
 
 ```json
 {
@@ -161,14 +148,16 @@ if (success) {
 }
 ```
 
-当服务端返回 `code == 0` 时，插件认为上报成功；其他返回或请求异常都会视为可重试失败。
+当服务端返回 `code == 0` 时，插件认为上传成功；其他返回或请求异常都会视为可重试失败。
 
 ## 失败补报机制
 
-- 首次上报成功：直接返回 `true`，不会写入失败队列。
-- 首次上报失败：返回 `false`，并把已加密的 `data`、`apiUrl`、`sct` 写入本地失败队列。
+- 首次上报成功：记录成功标记并返回 `true`，不会写入失败队列。
+- 已经成功上报过：直接返回 `true`，不会再次组装或上传数据。
+- 首次上报失败：返回 `false`，并把已加密请求或 iOS ASA 补报配置写入当前进程内存失败队列。
+- iOS ASA 归因明细为空：不执行加密上传，保存本次 iOS 上报配置，后续补报时重新获取 ASA 数据。
 - JSON 编码失败或 AES 加密失败：返回 `false`，不会进入失败队列。
-- 后台补报成功：自动移除对应失败记录。
+- 后台补报成功：记录已上传标记，并清空当前进程内存失败队列。
 - 后台补报再次失败：更新失败次数和下一次重试时间。
 
 退避间隔：
@@ -182,11 +171,14 @@ if (success) {
 | 5 | 40 秒 |
 | 6 及以上 | 60 秒 |
 
-失败队列只持久化已加密内容，不保存明文归因参数、AES key 或 AES IV。
+失败队列只保存在当前进程内存中。网络或服务端失败时只保存已加密内容；iOS ASA 归因明细获取失败时会保存本次补报所需配置，用于后续重新获取 ASA 数据。App 重启后队列会清空，业务再次调用上报方法即可重新触发上报。
+
+成功标记会通过 `qs_storage_tool` 持久化保存；如果业务需要重新上报，需要自行清理对应业务状态或调整调用时机。
 
 ## 注意事项
 
 - 请确保 `apiUrl`、`aesSecretKey`、`aesIv`、`aesSctToken` 与服务端配置一致。
 - 插件会通过 IP 获取位置信息；获取失败时会使用空字符串继续上报，不会中断主流程。
+- iOS 会通过 `qs_asa_attribution_info` 访问 Apple AdServices Attribution API，请确保业务 App 的 iOS 环境满足 Apple Search Ads 归因获取要求。
 - `jsonResponse` 不是合法 JSON 时，Android 上报中的 `raw` 字段会被置为 `null`，上报流程仍会继续。
-- 后台补报依赖当前 App 进程存活；App 重启后需要再次调用 `retryFailedAttributionReports()` 唤醒历史队列。
+- 后台补报依赖当前 App 进程存活；App 重启后不会恢复历史失败队列，用户再次调用上报方法时会重新触发上报。
